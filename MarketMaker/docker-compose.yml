@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  # Database service using PostgreSQL 16
+  db:
+    image: postgres:16
+    container_name: marketmaker_db
+    environment:
+      # Default credentials and database name created on first startup
+      POSTGRES_USER: marketmaker
+      POSTGRES_PASSWORD: marketmakerpass
+      POSTGRES_DB: marketmaker
+    
+    ports:
+      - "5432:5432" # Expose standard PostgreSQL port
+    volumes:
+      - pgdata:/var/lib/postgresql/data # Persist data to a named volume
+
+  # Main backend application service
+  backend:
+    build: ./backend # Builds the image from the Dockerfile in ./backend
+    container_name: marketmaker_backend
+    environment:
+      # Database connection string pointing to the 'db' service
+      DATABASE_URL: postgres://marketmaker:marketmakerpass@db:5432/marketmaker
+      STOCK_WATCHLIST: "AAPL,GOOGL,AMD,AMZN,TSLA"
+      POLL_INTERVAL_SECONDS: "120"
+      ANOMALY_THRESHOLD: "0.75"
+      QUIVER_API_KEY: your_quiver_api_key_here
+      QUIVER_API_SECRET: your_quiver_api_secret_here
+      SEC_USER_AGENT: "MarketMaker alessionaji1@gmail.com"
+    
+    depends_on:
+      - db # Ensures the database container starts before the backend
+
+    ports:
+      - "8000:8000" # Expose FastAPI on port 8000
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Define named volumes for persistent storage
+volumes:
+  pgdata:
