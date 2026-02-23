@@ -18,7 +18,8 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   backend:
-    build: ./backend
+    build: 
+      context: ./backend
     container_name: marketmaker_backend
     restart: unless-stopped
 
@@ -29,10 +30,7 @@ services:
       POLYMARKET_QUERY: "election"
       POLL_INTERVAL_SECONDS: "120"
       ANOMALY_THRESHOLD: "0.75"
-
-      QUIVER_API_TOKEN: your_quiver_api_key_here
-      QUIVER_API_SECRET: your_quiver_api_secret_here
-
+      FMP_API_KEY: "API KEY HERE"
       SEC_USER_AGENT: "MarketMaker alessionaji1@gmail.com"
 
     depends_on:
