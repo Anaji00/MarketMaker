@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import asyncio
 from fastapi import FastAPI
 from app.db import init_db
 from app.logging import setup_logging
@@ -57,10 +58,15 @@ async def _job_tick():
     try:
         # Now, we run the ingestion pipelines sequentially.
         # We use 'await' for async IO operations (Polymarket).
-        await ingest_stocks_and_options(db)
-        await ingest_polymarket(db)
-        # Quiver is synchronous, so we call it directly.
-        ingest_quiver_altdata(db)
+        await asyncio.gather(
+            ingest_stocks_and_options(db),
+            injest_fmp_altdata(db),
+            ingest_polymarket(db),
+        )
+    except Exception as e:
+        log.exception(f"tick failed: {e}")
+
+        
     finally:
         # Now, we explicitly close the session to return the connection to the pool.
         db.close()

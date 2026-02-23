@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import json
 from sqlalchemy.orm import Session
-
+import asyncio
 from app.core.normalize import NormalizedSignal
 from app.core.features import stock_features, options_features, features_json
 from app.core.scoring import ScoringEngine
@@ -13,14 +13,18 @@ from app.config import settings
 from app.services.stocks_yf import fetch_recent_stock_bars
 from app.services.options_yf import fetch_options_snapshot
 from app.services.polymarket_gamma import fetch_events, extract_market_signals_from_event
-from app.services.quiver_adapter import QuiverAdapter
+from app.services.fmp_adapter import FMPAdapter
 
 log = logging.getLogger("core.ingest")
 
 # Now, we instantiate the Scoring Engine and Adapters.
 # These are effectively Singletons within this module scope.
 scoring = ScoringEngine()
-quiver = QuiverAdapter(settings.quiver_api_token)
+fmp = FMPAdapter(
+    settings.fmp_api_key,
+    settings.fmp_rate_limit_per_minute,
+    settings.fmp_rate_limit_per_day,
+)
 
 def _persist_signal(db: Session, ns: NormalizedSignal, scored: dict) -> Signal:
     # Now, we map the NormalizedSignal and Score results to the Database Model.
@@ -60,8 +64,10 @@ async def _possible_alert(db: Session, signal: Signal) -> None:
         f"Anomaly Score = {signal.anomaly_score:.3f}\n"
         f"Notional = {signal.notional:.2f}\n"
         f"Features = {signal.features}\n"
+        f"Direction = {signal.direction}\n"
+        
     )
-    a = Alert(symbol=signal.symbol, severity=severity, title=title, body=body, signal_ids=signal.id)
+    a = Alert(symbol=signal.symbol, severity=severity, title=title, body=body, signal_ids=[signal.id])
     db.add(a)
     db.commit()
 
@@ -121,43 +127,71 @@ async def ingest_polymarket(db: Session) -> None:
             sig = _persist_signal(db, ns, scored)
             _possible_alert(db, sig)
 
-def ingest_quiver_altdata(db: Session) -> None:
+async def ingest_fmp_altdata(db: Session) -> None:
     # Now, we check if the adapter is enabled (Token present).
-    if not quiver.enabled():
+    if not fmp.enabled():
+        log.info("FMP Adapter Disabled (Check API KEY)")
         return
     
-    for row in quiver.fetch_congress_trades():
-        sym = str(row.get("Ticker") or row.get("ticker") or "").upper()
-        if not sym:
-            continue
-        ns = NormalizedSignal(
-            source="CONGRESS",
-            symbol=sym,
-            kind="congress_trade",
-            direction=str(row.get("Transaction") or row.get("transaction") or "N/A").lower(),
-            notional=float(row.get("Amount") or row.get("amount") or 0.0),
-            raw=row,
-        )
-        scored = scoring.score(ns.source, ns.kind, {}, ns.raw, ns.notional)
-        sig = _persist_signal(db, ns, scored)
-        _possible_alert(db, sig)
-
-        # Note: Insider trades could be added similarly if desired
-        for row in quiver.fetch_insider_trades():
-            sym = str(row.get("Ticker") or row.get("ticker") or "").upper()
-            if not sym:
+    senate_trades, house_trades, insider_trades = await asyncio,gather(
+        fmp.fetch_senate_trades(),
+        fmp.fetch_house_trades(),
+        fmp.fetch_insider_trades(),
+    
+    )
+    if isinstance(senate_trades, list):
+        for row in senate_trades:
+            sym = str(row.get("Ticker", "")).upper()
+            if not sym or sym == "N/A":
                 continue
+            
             ns = NormalizedSignal(
-                source="INSIDER",
+                source="SENATE",
                 symbol=sym,
-                kind="insider_trade",
-                direction=str(row.get("Transaction") or row.get("transaction") or "na").lower(),
-                notional=float(row.get("Value") or row.get("value") or 0.0),
+                kind="senate_trade",
+                direction=str(row.get("Transaction", "") or row.get("transaction") or "N/A").lower(),
+                notional=float(row.get("Amount", 0.0) or row.get("amount") or 0.0),
                 raw=row,
             )
             scored = scoring.score(ns.source, ns.kind, {}, ns.raw, ns.notional)
             sig = _persist_signal(db, ns, scored)
-            _possible_alert(db, sig)
+            await _possible_alert(db, sig)
+
+    if isinstance(house_trades, list):
+        for row in house_trades:
+            sym = str(row.get("Ticker", "")).upper()
+            if not sym or sym == "N/A":
+                continue
+            
+            ns = NormalizedSignal(
+                source="HOUSE",
+                symbol=sym,
+                kind="house_trade",
+                direction=str(row.get("Transaction", "")).lower()
+                notional=float(row.get("Amount", 0.0) or row.get("amount") or 0.0),
+                raw=row,
+            )
+            scored = scoring.score(ns.source, ns.kind, {}, ns.raw, ns.notional)
+            sig = _persist_signal(db, ns, scored)
+            await _possible_alert(db, sig)
+
+    if isinstance(insider_trades, list):
+        for row in insider_trades:
+            sym = str(row.get("Ticker", "")).upper()
+            if not sym or sym == "N/A":
+                continue
+        
+            ns = NormalizedSignal(
+                source="INSIDER",
+                symbol=sym,
+                kind="insider_trade",
+                direction=str(row.get("Transaction", "")).lower(),
+                notional=float(row.get("Value", 0.0) or row.get("value") or 0.0),
+                raw=row,
+            )
+            scored = scoring.score(ns.source, ns.kind, {}, ns.raw, ns.notional)
+            sig = _persist_signal(db, ns, scored)
+            await _possible_alert(db, sig)
 
 def refit_models_from_db(db: Session) -> None:
     """
@@ -174,3 +208,4 @@ def refit_models_from_db(db: Session) -> None:
         except Exception:
             continue
     scoring.fit_anomaly_model(feats)
+    log.info(f"refitted anomaly model with {len(feats)} historical signals")
